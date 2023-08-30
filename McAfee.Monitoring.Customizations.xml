@@ -1,0 +1,2406 @@
+﻿<?xml version="1.0" encoding="utf-8"?><ManagementPack ContentReadable="true" SchemaVersion="2.0" OriginalSchemaVersion="1.1" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <Manifest>
+    <Identity>
+      <ID>McAfee.Monitoring.Customizations</ID>
+      <Version>1.0.1.1</Version>
+    </Identity>
+    <Name>McAfee Monitoring Customizations</Name>
+    <References>
+      <Reference Alias="Health">
+        <ID>System.Health.Library</ID>
+        <Version>7.0.8433.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="MSIL">
+        <ID>Microsoft.SystemCenter.InstanceGroup.Library</ID>
+        <Version>7.5.8501.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="SC">
+        <ID>Microsoft.SystemCenter.Library</ID>
+        <Version>7.0.8433.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="System">
+        <ID>System.Library</ID>
+        <Version>7.5.8501.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+      <Reference Alias="Windows">
+        <ID>Microsoft.Windows.Library</ID>
+        <Version>7.5.8501.0</Version>
+        <PublicKeyToken>31bf3856ad364e35</PublicKeyToken>
+      </Reference>
+    </References>
+  </Manifest>
+  <TypeDefinitions>
+	<EntityTypes>
+	  <ClassTypes>
+        <ClassType ID="McAfee.Monitoring.Group" Accessibility="Public" Abstract="false" Base="MSIL!Microsoft.SystemCenter.InstanceGroup" Hosted="false" Singleton="true" Extension="false" />
+        <ClassType ID="McAfee.Seed" Accessibility="Public" Abstract="false" Base="Windows!Microsoft.Windows.LocalApplication" Hosted="true" Singleton="false" Extension="false" />
+	  </ClassTypes>
+	</EntityTypes>
+    <ModuleTypes>
+      <DataSourceModuleType ID="McAfee.SummaryReport.Script.DataSource" Accessibility="Internal" Batching="false">
+        <Configuration>
+		  <xsd:element minOccurs="1" type="xsd:integer" name="TimeoutSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />	
+        </Configuration>
+        <OverrideableParameters>
+		  <OverrideableParameter ID="TimeoutSeconds" Selector="$Config/TimeoutSeconds$" ParameterType="int" />
+        </OverrideableParameters>
+        <ModuleImplementation Isolation="Any">
+          <Composite>
+            <MemberModules>
+              <DataSource ID="Scheduler" TypeID="System!System.Scheduler">
+                <Scheduler>
+                  <WeeklySchedule>
+                    <Windows>
+                      <Daily>
+                        <Start>06:18</Start>
+                        <End>06:38</End>
+                        <DaysOfWeekMask>62</DaysOfWeekMask>
+                      </Daily>
+                    </Windows>
+                  </WeeklySchedule>
+                  <ExcludeDates />
+                </Scheduler>
+              </DataSource>
+              <ProbeAction ID="PA" TypeID="Windows!Microsoft.Windows.PowerShellPropertyBagTriggerOnlyProbe">
+                 <ScriptName>McAfee.SummaryReport.Script.DataSource.v10110.ps1</ScriptName>
+                <ScriptBody>
+#=================================================================================
+#  Script to gather McAfee alerts and close via on demand task
+#
+#  Author: Kevin Justin
+#  v1.0
+#=================================================================================
+
+
+# Constants section - modify stuff here:
+#=================================================================================
+# Assign script name variable for use in event logging.  
+# ScriptName should be the same as the ID of the module that the script is contained in
+$ScriptName = "McAfee.SummaryReport.Script.DataSource.v10110.ps1"
+$EventID = "572"
+#=================================================================================
+
+
+# Starting Script section - All scripts get this
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+#Set variable to be used in logging events
+$whoami = whoami
+# Load MOMScript API
+$momapi = New-Object -comObject MOM.ScriptAPI
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script is starting. `n Running as ($whoami).")
+#=================================================================================
+
+
+# PropertyBag Script section - Monitoring scripts get this
+#=================================================================================
+# Load SCOM PropertyBag function
+$bag = $momapi.CreatePropertyBag()
+#=================================================================================
+
+
+# Begin MAIN script section
+#=================================================================================
+
+#For a simple example - get files in Windows Temp:
+$date = get-date -uFormat "%Y-%m-%d"
+
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Gather McAfee services Alert report for date ($date).")
+
+# Grab past 24 hours
+if ( (get-date).DayOfWeek -ne "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-1)
+	}
+if ( (get-date).DayOfWeek -eq "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-3)
+	}
+	
+#$7031Events = get-SCOMAlert -name "*McAfee*"
+$7031Events = get-scomalert -name "NG McAfee*" | ? { ( $_.Name -like "McAfee EventID7031*" ) `
+	-OR ( $_.Name -eq "McAfee Agent Service" ) `
+	-OR ( $_.Name -like "McAfee Service*" ) 
+	} | ? { $_.TimeRaised -ge $Time } 
+
+$Test = $7031Events.Count
+
+$Alerts = $7031Events | ft TimeRaised,NetbiosComputerName,Name -auto -wrap
+
+
+$AlertSorted = @()
+
+foreach ( $Name in $($7031Events.Name | sort -uniq) )
+	{
+	$AlertSorted += $Name
+	$AlertSorted +=	$7031Events | ? { $_.Name -eq $Name } | ft TimeRaised,NetbiosComputerName
+	$AlertSorted += "#====================================="
+	}
+
+# Check for open alerts older than reporting period
+$OpenAlerts = $7031Events | ? { $_.ResolutionState -ne "255"}
+
+$OpenAlertDetail = $OpenAlerts | ft TimeRaised,NetbiosComputerName,Name -auto -wrap
+
+# Alerts closed within report period $Time
+$ClosedAlerts = $7031Events | ? { $_.ResolutionState -eq "255"}
+	
+	
+$MSEMessage = @()
+
+if ( $7031Events.count -gt 0 )
+	{
+	$MSEMessage += ""
+	$MSEMessage += "#"
+	$MSEMessage += "# Number of 7031 Events with McAfee service failures"
+	$MSEMessage += "#"
+	$MSEMessage += "# Open McAfee alerts = $($OpenAlerts.Count)"
+	$MSEMessage += "#=========================================="
+	$MSEMessage += $OpenAlertDetail
+	$MSEMessage += "#========================================================"
+	$MSEMessage += "#"
+	$MSEMessage += "# Alerts since last report run = $($7031Events.Count)"
+	$MSEMessage += "#"
+	$MSEMessage += "# Closed alerts since last report run = $($ClosedAlerts.Count)"
+	#$MSEMessage += "#"	
+	#$MSEMessage += "# Alert details (since last report run)"
+	#$MSEMessage += "#========================================================"
+	#$MSEMessage += $AlertSorted
+	#$MSEMessage += "#========================================================"
+	$MSEMessage += ""
+	
+	$MSEMessage
+
+	$MSEMessage = $MSEMessage | out-string
+
+	$Message = "Number of 7031 Events with McAfee service failures" | out-string
+
+	$bag.AddValue('Count',$Test)
+	$bag.AddValue('Message',$Message)
+	$bag.AddValue('Summary',$MSEMessage)
+
+	$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n$MSEMessage")
+	}
+
+if ( $7031Events.count -eq 0 )
+	{
+	$Message += "ZERO System Event Id 7031 events for McAfee service failures for date ($date)."
+	$momapi.LogScriptEvent($ScriptName,$EventID,0,"`nZERO McAfee service failures for date ($date).")
+	
+	$bag.AddValue('Count',$Test)
+	$bag.AddValue('Message',$Message)
+	$bag.AddValue('Summary',$MSEMessage)
+	}
+	
+# Return all bags
+$bag
+
+
+
+# Reset Monitors Script
+# Put ps1 in mgmtpacks folder
+# https://sc.scomurr.com/scom-2012-monitor-reset-cleaning-up-the-environment/
+#	Download
+# https://gallery.technet.microsoft.com/SCOM-2012-Batch-reset-63a17534
+	
+#Alternate
+#https://gallery.technet.microsoft.com/scriptcenter/Auto-reset-script-for-d8b775ca
+
+$McAfeeMonitorsToAutoClose = @()
+
+# McAfee Alerts to auto-close
+  # Monitors
+$McAfeeMonitorsToAutoClose += "DTRA McAfee Agent Service Monitor"
+$McAfeeMonitorsToAutoClose += "DTRA McAfee Service Monitor"
+$McAfeeMonitorsToAutoClose += "DTRA McAfee EventID7031 Monitor"
+
+#
+# Create Array for all the unhealthy monitors
+$UnhealthyMonitors = @()
+
+if ( $Test -gt 0 )
+{
+foreach ($MonitorDisplayName in $McAfeeMonitorsToAutoClose)
+	{
+	$Monitors = @(Get-SCOMMonitor -displayname $MonitorDisplayName)
+
+	# Set up monitor objects to reset
+		
+	foreach ($Monitor in $Monitors)
+		{
+		$MonitorClass = Get-SCOMClass -Id $Monitor.Target.Id
+		write-host ""
+		write-host "Monitor Class = " + $MonitorClass
+		$ActiveMonitors = Get-SCOMClassInstance -Class $MonitorClass | ? { ($_.healthstate -ne 'Success') -AND ( $_.healthstate -ne 'Uninitialized') -AND ($_.IsAvailable -eq $true) }
+		$UnhealthyMonitors += $ActiveMonitors.Count
+		$ActiveMonitors.Count
+		write-host "Found" + $ActiveMonitors.Count + "active monitors."
+		write-host ""
+		if ( $ActiveMonitors.Count -gt 0)
+			{
+			foreach ($ActiveMonitor in $ActiveMonitors)
+				{
+				write-host " Resetting Health State on '" +$ActiveMonitor.FullName + "'" 
+				$ActiveMonitor.ResetMonitoringState($Monitor.ID)
+				}
+			}
+		}
+	}
+}
+
+	
+
+#
+# Clean up/Resolve open alert rules
+
+#
+# (Rules) Set array for closing rules
+$OpenMcAfeeRulesToClose = @()
+
+$OpenMcAfeeRulesToClose = get-scomalert | ? { ( $_.Name -eq "DTRA McAfee EventID7031 Rule" ) `
+	-OR ( $_.Name -like "DTRA McAfee*Service*Recovery*" ) `
+	} | ? { $_.ResolutionState -ne "255"}  
+	#| ? { $_.TimeRaised -gt $Time }
+
+$OpenMcAfeeRulesToClose.Count
+
+if ( $OpenMcAfeeRulesToClose.Count -gt 0 )
+	{
+	$OpenMcAfeeRulesToClose | Set-SCOMAlert -ResolutionState 255 -Comment "SCOM McAfee Auto-alert closure"
+	}
+
+
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+#=================================================================================
+# End of script
+                </ScriptBody>
+                <TimeoutSeconds>$Config/TimeoutSeconds$</TimeoutSeconds>
+              </ProbeAction>
+            </MemberModules>
+            <Composition>
+              <Node ID="PA">
+                <Node ID="Scheduler" />
+              </Node>
+            </Composition>
+          </Composite>
+        </ModuleImplementation>
+        <OutputType>System!System.PropertyBagData</OutputType>
+      </DataSourceModuleType>
+      <DataSourceModuleType ID="McAfee.EventID7031.Monitor.DataSource" Accessibility="Internal" Batching="false">
+        <Configuration>
+		  <xsd:element minOccurs="1" type="xsd:integer" name="IntervalSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+		  <xsd:element minOccurs="0" type="xsd:string" name="SyncTime" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+		  <xsd:element minOccurs="1" type="xsd:integer" name="TimeoutSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />	
+        </Configuration>
+        <OverrideableParameters>
+		  <OverrideableParameter ID="IntervalSeconds" Selector="$Config/IntervalSeconds$" ParameterType="int" />
+		  <OverrideableParameter ID="SyncTime" Selector="$Config/SyncTime$" ParameterType="string" />
+		  <OverrideableParameter ID="TimeoutSeconds" Selector="$Config/TimeoutSeconds$" ParameterType="int" />
+        </OverrideableParameters>
+        <ModuleImplementation Isolation="Any">
+          <Composite>
+            <MemberModules>
+              <DataSource ID="Scheduler" TypeID="System!System.Scheduler">
+                <Scheduler>
+                  <SimpleReccuringSchedule>
+                    <Interval Unit="Seconds">$Config/IntervalSeconds$</Interval>
+					<SyncTime>$Config/SyncTime$</SyncTime>
+                  </SimpleReccuringSchedule>
+                  <ExcludeDates />
+                </Scheduler>
+              </DataSource>
+              <ProbeAction ID="PA" TypeID="Windows!Microsoft.Windows.PowerShellPropertyBagTriggerOnlyProbe">
+                <ScriptName>McAfee.EventID7031.Monitor.DataSource.v10110.ps1</ScriptName>
+                <ScriptBody>
+#=================================================================================
+#  Gather Mcafee System Event ID 7031's for service issues
+#
+#  Author:  Kevin Justin
+#  v1.0
+#=================================================================================
+
+
+# Constants section - modify stuff here:
+#=================================================================================
+# Assign script name variable for use in event logging.  
+$ScriptName = "McAfee.EventID7031.Monitor.DataSource.v10110.ps1"
+$EventID = "570"
+#=================================================================================
+
+
+# Starting Script section - All scripts get this
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+#Set variable to be used in logging events
+$whoami = whoami
+# Load MOMScript API
+$momapi = New-Object -comObject MOM.ScriptAPI
+# Load PropertyBag function 
+$bag = $momapi.CreatePropertyBag()
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script is starting. `n Running as ($whoami).")
+#=================================================================================
+
+
+# Begin MAIN script section
+#=================================================================================
+
+#For a simple example - get files in Windows Temp:
+$date = get-date -uFormat "%Y-%m-%d"
+
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Gather McAfee services Alerts for date ($date).")
+
+# Grab past 15 minutes
+$Time = [DateTime](Get-Date).AddMinutes(-15)
+
+$SystemEvents = get-eventlog -LogName "System" | ? { ( $_.TimeGenerated -gt $Time ) `
+	} | ? { ( $_.EventID -eq 7031 ) -AND ( ($_.Message -like "*macmnsvc*") `
+	-OR ($_.Message -like "*masvc*") ) `
+	}
+	
+$SystemEvents.count
+$Test = $SystemEvents.count
+
+
+$MSEMessage = @()
+
+
+if ( $SystemEvents.count -eq 0 )
+	{
+	$MSEMessage += "ZERO 7031 System Event ID's with McAfee service failures"
+	
+	$strCondition = "Good"
+	$momapi.LogScriptEvent($ScriptName,$EventID,0,$MSEMessage)
+	
+	$bag.AddValue('Result',$strCondition)
+	$bag.AddValue('Count',$Test)
+	$bag.AddValue('Summary',$MSEMessage)
+	}
+	
+	
+if ( $SystemEvents.count -gt 0 )
+	{
+	$strCondition = "Good"
+	
+	$MSEMessage += ""
+	$MSEMessage += "#"
+	$MSEMessage += "# Number of 7031 Events with McAfee service failures"
+	$MSEMessage += $SystemEvents.Count
+	$MSEMessage += ""
+	$MSEMessage += "# Details"
+	$MSEMessage += "#========================================================"
+	$MSEMessage += $SystemEvents | ft Message,TimeGenerated -auto
+	$MSEMessage += "#========================================================"
+	$MSEMessage += ""
+	
+	$MSEMessage
+
+	$MSEMessage = $MSEMessage | out-string
+
+# Check if service is running	
+	if ( $(get-service macmnsvc).Status -ne "running" )
+		{
+		restart-service macmnsvc; sleep 15
+		}
+		
+	if ( $(get-service macmnsvc).Status -ne "running" )
+		{
+		#Set the condition = bad.  This represents your script finding something wrong
+		$strCondition = "Bad"
+		
+		$momapi.LogScriptEvent($ScriptName,$EventID,0,"McAfee service macmnsvc NOT running after automated service restart")
+		}
+		
+	$momapi.LogScriptEvent($ScriptName,$EventID,0,"$MSEMessage")
+		
+	$bag.AddValue('Result',$strCondition)
+	$bag.AddValue('Count',$Test)
+	$bag.AddValue('Summary',$MSEMessage)
+
+	}
+	
+
+# Return all bags
+$bag
+
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+#=================================================================================
+# End of script
+                </ScriptBody>
+                <TimeoutSeconds>$Config/TimeoutSeconds$</TimeoutSeconds>
+              </ProbeAction>
+            </MemberModules>
+            <Composition>
+              <Node ID="PA">
+                <Node ID="Scheduler" />
+              </Node>
+            </Composition>
+          </Composite>
+        </ModuleImplementation>
+        <OutputType>System!System.PropertyBagData</OutputType>
+      </DataSourceModuleType>
+      <WriteActionModuleType ID="McAfee.SummaryReport.Script.WA" Accessibility="Internal" Batching="false">
+        <Configuration>
+          <xsd:element minOccurs="1" name="TimeoutSeconds" type="xsd:integer" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+        </Configuration>
+        <OverrideableParameters>
+          <OverrideableParameter ID="TimeoutSeconds" Selector="$Config/TimeoutSeconds$" ParameterType="int" />
+        </OverrideableParameters>
+        <ModuleImplementation Isolation="Any">
+          <Composite>
+            <MemberModules>
+              <WriteAction ID="PSWA" TypeID="Windows!Microsoft.Windows.PowerShellWriteAction">
+                <ScriptName>McAfee.SummaryReport.Script.WA.v10110.ps1</ScriptName>
+                <ScriptBody>
+#=================================================================================
+#  Script to gather DNS alerts and close via on demand task
+#
+#  Author: Kevin Justin
+#  v1.0
+#=================================================================================
+
+
+# Constants section - modify stuff here:
+#=================================================================================
+# Assign script name variable for use in event logging.  
+# ScriptName should be the same as the ID of the module that the script is contained in
+$ScriptName = "McAfee.SummaryReport.Script.WA.v10110.ps1"
+$EventID = "571"
+#=================================================================================
+
+# Starting Script section - All scripts get this
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+#Set variable to be used in logging events
+$whoami = whoami
+# Load MOMScript API
+$momapi = New-Object -comObject MOM.ScriptAPI
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script is starting. `n Running as ($whoami).")
+#=================================================================================
+
+
+# PropertyBag Script section - Monitoring scripts get this
+#=================================================================================
+# Load SCOM PropertyBag function
+$bag = $momapi.CreatePropertyBag()
+#=================================================================================
+
+
+# Begin MAIN script section
+#=================================================================================
+
+#For a simple example - get files in Windows Temp:
+$date = get-date -uFormat "%Y-%m-%d"
+
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Gather McAfee services Alert report for date ($date).")
+
+# Grab past 24 hours
+if ( (get-date).DayOfWeek -ne "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-1)
+	}
+if ( (get-date).DayOfWeek -eq "Monday" )
+	{
+	$Time = [DateTime](Get-Date).AddDays(-3)
+	}
+	
+#$7031Events = get-SCOMAlert -name "*McAfee*"
+$7031Events = get-scomalert -name "NG McAfee*" | ? { ( $_.Name -like "McAfee EventID7031*" ) `
+	-OR ( $_.Name -eq "McAfee Agent Service" ) `
+	-OR ( $_.Name -like "McAfee Service*" ) 
+	} | ? { $_.TimeRaised -ge $Time } 
+
+$Test = $7031Events.Count
+
+$Alerts = $7031Events | ft TimeRaised,NetbiosComputerName,Name -auto -wrap
+
+
+$AlertSorted = @()
+
+foreach ( $Name in $($7031Events.Name | sort -uniq) )
+	{
+	$AlertSorted += $Name
+	$AlertSorted +=	$7031Events | ? { $_.Name -eq $Name } | ft TimeRaised,NetbiosComputerName
+	$AlertSorted += "#====================================="
+	}
+
+# Check for open alerts older than reporting period
+$OpenAlerts = $7031Events | ? { $_.ResolutionState -ne "255"}
+
+$OpenAlertDetail = $OpenAlerts | ft TimeRaised,NetbiosComputerName,Name -auto -wrap
+
+# Alerts closed within report period $Time
+$ClosedAlerts = get-scomalert -name "McAfee *" | ? { $_.ResolutionState -eq "255"}
+	
+	
+$MSEMessage = @()
+
+if ( $7031Events.count -gt 0 )
+	{
+	$MSEMessage += ""
+	$MSEMessage += "#"
+	$MSEMessage += "# Number of 7031 Events with McAfee service failures"
+	$MSEMessage += "#"
+	$MSEMessage += "# Open McAfee alerts = $($OpenAlerts.Count)"
+	$MSEMessage += "#=========================================="
+	$MSEMessage += $OpenAlertDetail
+	$MSEMessage += "#========================================================"
+	$MSEMessage += "#"
+	$MSEMessage += "# Alerts since last report run = $($7031Events.Count)"
+	$MSEMessage += "#"
+	$MSEMessage += "# Closed alerts since last report run = $($ClosedAlerts.Count)"
+	#$MSEMessage += "#"	
+	#$MSEMessage += "# Alert details (since last report run)"
+	#$MSEMessage += "#========================================================"
+	#$MSEMessage += $AlertSorted
+	#$MSEMessage += "#========================================================"
+	$MSEMessage += ""
+	
+	$MSEMessage
+
+	$MSEMessage = $MSEMessage | out-string
+
+	$Message = "Number of 7031 Events with McAfee service failures" | out-string
+
+	$bag.AddValue('Count',$Test)
+	$bag.AddValue('Message',$Message)
+	$bag.AddValue('Summary',$MSEMessage)
+
+	$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n$MSEMessage")
+	}
+
+if ( $7031Events.count -eq 0 )
+	{
+	$Message += "ZERO System Event Id 7031 events for McAfee service failures for date ($date)."
+	$momapi.LogScriptEvent($ScriptName,$EventID,0,"`nZERO McAfee service failures for date ($date).")
+	
+	$bag.AddValue('Count',$Test)
+	$bag.AddValue('Message',$Message)
+	$bag.AddValue('Summary',$MSEMessage)
+	}
+	
+# Return all bags
+$bag
+
+
+# Reset Monitors Script
+# Put ps1 in mgmtpacks folder
+# https://sc.scomurr.com/scom-2012-monitor-reset-cleaning-up-the-environment/
+#	Download
+# https://gallery.technet.microsoft.com/SCOM-2012-Batch-reset-63a17534
+	
+#Alternate
+#https://gallery.technet.microsoft.com/scriptcenter/Auto-reset-script-for-d8b775ca
+
+$McAfeeMonitorsToAutoClose = @()
+
+# McAfee Alerts to auto-close
+  # Monitors
+$McAfeeMonitorsToAutoClose += "DTRA McAfee Agent Service Monitor"
+$McAfeeMonitorsToAutoClose += "DTRA McAfee Service Monitor"
+$McAfeeMonitorsToAutoClose += "DTRA McAfee EventID7031 Monitor"
+
+#
+# Create Array for all the unhealthy monitors
+$UnhealthyMonitors = @()
+
+if ( $Test -gt 0 )
+{
+foreach ($MonitorDisplayName in $McAfeeMonitorsToAutoClose)
+	{
+	$Monitors = @(Get-SCOMMonitor -displayname $MonitorDisplayName)
+
+	# Set up monitor objects to reset
+		
+	foreach ($Monitor in $Monitors)
+		{
+		$MonitorClass = Get-SCOMClass -Id $Monitor.Target.Id
+		write-host ""
+		write-host "Monitor Class = " + $MonitorClass
+		$ActiveMonitors = Get-SCOMClassInstance -Class $MonitorClass | ? { ($_.healthstate -ne 'Success') -AND ( $_.healthstate -ne 'Uninitialized') -AND ($_.IsAvailable -eq $true) }
+		$UnhealthyMonitors += $ActiveMonitors.Count
+		$ActiveMonitors.Count
+		write-host "Found" + $ActiveMonitors.Count + "active monitors."
+		write-host ""
+		if ( $ActiveMonitors.Count -gt 0)
+			{
+			foreach ($ActiveMonitor in $ActiveMonitors)
+				{
+				write-host " Resetting Health State on '" +$ActiveMonitor.FullName + "'" 
+				$ActiveMonitor.ResetMonitoringState($Monitor.ID)
+				}
+			}
+		}
+	}
+}
+
+	
+
+#
+# Clean up/Resolve open alert rules
+
+#
+# (Rules) Set array for closing rules
+$OpenMcAfeeRulesToClose = @()
+
+$OpenMcAfeeRulesToClose = get-scomalert | ? { ( $_.Name -like "McAfee*" ) `
+	}
+	#| ? { $_.TimeRaised -gt $Time }
+
+$OpenMcAfeeRulesToClose.Count
+
+if ( $OpenMcAfeeRulesToClose.Count -gt 0 )
+	{
+	$OpenMcAfeeRulesToClose | Set-SCOMAlert -ResolutionState 255 -Comment "SCOM McAfee Auto-alert closure"
+	}
+
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+#=================================================================================
+# End of script
+                </ScriptBody>
+                <TimeoutSeconds>$Config/TimeoutSeconds$</TimeoutSeconds>
+              </WriteAction>
+            </MemberModules>
+            <Composition>
+              <Node ID="PSWA" />
+            </Composition>
+          </Composite>
+        </ModuleImplementation>
+        <OutputType>System!System.BaseData</OutputType>
+        <InputType>System!System.BaseData</InputType>
+      </WriteActionModuleType>
+    </ModuleTypes>
+    <MonitorTypes>
+     <UnitMonitorType ID="McAfee.Service.Monitor.MonitorType" Accessibility="Public">
+        <MonitorTypeStates>
+          <MonitorTypeState ID="Running" NoDetection="false" />
+          <MonitorTypeState ID="NotRunning" NoDetection="false" />
+        </MonitorTypeStates>
+        <Configuration>
+          <xsd:element name="ComputerName" type="xsd:string" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+          <xsd:element name="ServiceName" type="xsd:string" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+          <xsd:element name="IntervalSeconds" type="xsd:integer" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+          <xsd:element name="CheckStartupType" minOccurs="0" maxOccurs="1" type="xsd:string" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+          <xsd:element name="Samples" type="xsd:integer" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+        </Configuration>		
+        <OverrideableParameters>
+          <OverrideableParameter ID="IntervalSeconds" Selector="$Config/IntervalSeconds$" ParameterType="int" />
+          <OverrideableParameter ID="CheckStartupType" Selector="$Config/CheckStartupType$" ParameterType="string" />
+          <OverrideableParameter ID="Samples" Selector="$Config/Samples$" ParameterType="int" />
+        </OverrideableParameters>
+        <MonitorImplementation>
+          <MemberModules>
+            <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.Win32ServiceInformationProvider">
+              <ComputerName>$Config/ComputerName$</ComputerName>
+              <ServiceName>$Config/ServiceName$</ServiceName>
+              <Frequency>$Config/IntervalSeconds$</Frequency>
+              <DisableCaching>true</DisableCaching>
+              <CheckStartupType>$Config/CheckStartupType$</CheckStartupType>
+            </DataSource>
+            <ProbeAction ID="Probe" TypeID="Windows!Microsoft.Windows.Win32ServiceInformationProbe">
+              <ComputerName>$Config/ComputerName$</ComputerName>
+              <ServiceName>$Config/ServiceName$</ServiceName>
+            </ProbeAction>
+            <ConditionDetection ID="ServiceRunning" TypeID="System!System.ExpressionFilter">
+              <Expression>
+                <Or>
+                  <Expression>
+                    <SimpleExpression>
+                      <ValueExpression>
+                        <XPathQuery Type="Integer">Property[@Name='StartMode']</XPathQuery>
+                      </ValueExpression>
+                      <Operator>Equal</Operator>
+                      <ValueExpression>
+                        <Value Type="Integer">4</Value> <!-- 0=BootStart 1=SystemStart 2=Automatic 3=Manual 4=Disabled -->
+                      </ValueExpression>
+                    </SimpleExpression>
+                  </Expression>
+                  <Expression>
+                    <SimpleExpression>
+                      <ValueExpression>
+                        <XPathQuery Type="Integer">Property[@Name='State']</XPathQuery>
+                      </ValueExpression>
+                      <Operator>Equal</Operator>
+                      <ValueExpression>
+                        <Value Type="Integer">4</Value> <!-- 0=Unknown 1=Stopped 2=StartPending 3=StopPending 4=Running 5=ContinuePending 6=PausePending 7=Paused 8=ServiceNotFound 9=ServerNotFound -->
+                      </ValueExpression>
+                    </SimpleExpression>
+                  </Expression>
+                </Or>
+              </Expression>
+            </ConditionDetection>
+            <ConditionDetection ID="ServiceNotRunning" TypeID="System!System.ExpressionFilter">
+              <Expression>
+                <And>
+                  <Expression>
+                    <SimpleExpression>
+                      <ValueExpression>
+                        <XPathQuery Type="Integer">Property[@Name='StartMode']</XPathQuery>
+                      </ValueExpression>
+                      <Operator>NotEqual</Operator>
+                      <ValueExpression>
+                        <Value Type="Integer">4</Value> <!-- 0=BootStart 1=SystemStart 2=Automatic 3=Manual 4=Disabled -->
+                      </ValueExpression>
+                    </SimpleExpression>
+                  </Expression>
+                  <Expression>
+                    <SimpleExpression>
+                      <ValueExpression>
+                        <XPathQuery Type="Integer">Property[@Name='State']</XPathQuery>
+                      </ValueExpression>
+                      <Operator>NotEqual</Operator>
+                      <ValueExpression>
+                        <Value Type="Integer">4</Value> <!-- 0=Unknown 1=Stopped 2=StartPending 3=StopPending 4=Running 5=ContinuePending 6=PausePending 7=Paused 8=ServiceNotFound 9=ServerNotFound -->
+                      </ValueExpression>
+                    </SimpleExpression>
+                  </Expression>
+                </And>
+              </Expression>
+              <SuppressionSettings>
+                <MatchCount>$Config/Samples$</MatchCount>
+              </SuppressionSettings>			  
+            </ConditionDetection>
+          </MemberModules>
+          <RegularDetections>
+            <RegularDetection MonitorTypeStateID="Running">
+              <Node ID="ServiceRunning">
+                <Node ID="DS" />
+              </Node>
+            </RegularDetection>
+            <RegularDetection MonitorTypeStateID="NotRunning">
+              <Node ID="ServiceNotRunning">
+                <Node ID="DS" />
+              </Node>
+            </RegularDetection>
+          </RegularDetections>
+          <OnDemandDetections>
+            <OnDemandDetection MonitorTypeStateID="Running">
+              <Node ID="ServiceRunning">
+                <Node ID="Probe" />
+              </Node>
+            </OnDemandDetection>
+            <OnDemandDetection MonitorTypeStateID="NotRunning">
+              <Node ID="ServiceNotRunning">
+                <Node ID="Probe" />
+              </Node>
+            </OnDemandDetection>
+          </OnDemandDetections>
+        </MonitorImplementation>
+      </UnitMonitorType>
+     <UnitMonitorType ID="McAfee.EventID7031.Monitor.MonitorType" Accessibility="Internal">
+        <MonitorTypeStates>
+          <MonitorTypeState ID="GoodCondition" NoDetection="false" />
+          <MonitorTypeState ID="BadCondition" NoDetection="false" />
+        </MonitorTypeStates>
+        <Configuration>
+		  <xsd:element minOccurs="1" type="xsd:integer" name="IntervalSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+		  <xsd:element minOccurs="0" type="xsd:string" name="SyncTime" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />
+		  <xsd:element minOccurs="1" type="xsd:integer" name="TimeoutSeconds" xmlns:xsd="http://www.w3.org/2001/XMLSchema" />	
+        </Configuration>
+        <OverrideableParameters>
+		  <OverrideableParameter ID="IntervalSeconds" Selector="$Config/IntervalSeconds$" ParameterType="int" />
+		  <OverrideableParameter ID="SyncTime" Selector="$Config/SyncTime$" ParameterType="string" />
+		  <OverrideableParameter ID="TimeoutSeconds" Selector="$Config/TimeoutSeconds$" ParameterType="int" />
+        </OverrideableParameters>
+        <MonitorImplementation>
+          <MemberModules>
+            <DataSource ID="DS" TypeID="McAfee.EventID7031.Monitor.DataSource">
+			  <IntervalSeconds>$Config/IntervalSeconds$</IntervalSeconds>
+			  <SyncTime>$Config/SyncTime$</SyncTime>	
+			  <TimeoutSeconds>$Config/TimeoutSeconds$</TimeoutSeconds>
+            </DataSource>
+            <ConditionDetection ID="GoodConditionFilter" TypeID="System!System.ExpressionFilter">
+              <Expression>
+                <SimpleExpression>
+                  <ValueExpression>
+                    <XPathQuery Type="String">Property[@Name='Result']</XPathQuery>
+                  </ValueExpression>
+                  <Operator>Equal</Operator>
+                  <ValueExpression>
+                    <Value Type="String">GoodCondition</Value>
+                  </ValueExpression>
+                </SimpleExpression>
+              </Expression>
+            </ConditionDetection>
+            <ConditionDetection ID="BadConditionFilter" TypeID="System!System.ExpressionFilter">
+              <Expression>
+                <SimpleExpression>
+                  <ValueExpression>
+                    <XPathQuery Type="String">Property[@Name='Result']</XPathQuery>
+                  </ValueExpression>
+                  <Operator>Equal</Operator>
+                  <ValueExpression>
+                    <Value Type="String">BadCondition</Value>
+                  </ValueExpression>
+                </SimpleExpression>
+              </Expression>
+            </ConditionDetection>
+          </MemberModules>
+          <RegularDetections>
+            <RegularDetection MonitorTypeStateID="GoodCondition">
+              <Node ID="GoodConditionFilter">
+                <Node ID="DS" />
+              </Node>
+            </RegularDetection>
+            <RegularDetection MonitorTypeStateID="BadCondition">
+              <Node ID="BadConditionFilter">
+                <Node ID="DS" />
+              </Node>
+            </RegularDetection>
+          </RegularDetections>
+          <OnDemandDetections>
+            <OnDemandDetection MonitorTypeStateID="GoodCondition">
+              <Node ID="GoodConditionFilter">
+                <Node ID="DS" />
+              </Node>
+            </OnDemandDetection>
+            <OnDemandDetection MonitorTypeStateID="BadCondition">
+              <Node ID="BadConditionFilter">
+                <Node ID="DS" />
+              </Node>
+            </OnDemandDetection>
+          </OnDemandDetections>
+        </MonitorImplementation>
+      </UnitMonitorType>
+    </MonitorTypes>
+  </TypeDefinitions>
+  <Monitoring>
+    <Discoveries>
+      <Discovery ID="McAfee.Monitoring.Group.Discovery" Enabled="true" Target="McAfee.Monitoring.Group" ConfirmDelivery="false" Remotable="true" Priority="Normal">
+        <Category>Discovery</Category>
+        <DiscoveryTypes>
+          <DiscoveryRelationship TypeID="MSIL!Microsoft.SystemCenter.InstanceGroupContainsEntities" />
+        </DiscoveryTypes>
+        <DataSource ID="GroupPopulationDataSource" TypeID="SC!Microsoft.SystemCenter.GroupPopulator">
+          <RuleId>$MPElement$</RuleId>
+          <GroupInstanceId>$MPElement[Name="McAfee.Monitoring.Group"]$</GroupInstanceId>
+          <MembershipRules>
+            <MembershipRule>
+              <MonitoringClass>$MPElement[Name="Windows!Microsoft.Windows.Computer"]$</MonitoringClass>
+              <RelationshipClass>$MPElement[Name="MSIL!Microsoft.SystemCenter.InstanceGroupContainsEntities"]$</RelationshipClass>
+              <Expression>
+                <RegExExpression>
+                  <ValueExpression>
+                    <Property>$MPElement[Name="Windows!Microsoft.Windows.Computer"]/PrincipalName$</Property>
+                  </ValueExpression>
+                  <Operator>MatchesRegularExpression</Operator>
+                  <Pattern>(?i)dn[demru]</Pattern>
+                </RegExExpression>
+              </Expression>
+            </MembershipRule>
+          </MembershipRules>
+        </DataSource>
+      </Discovery>
+      <Discovery ID="McAfee.Discovery.Seed" Enabled="true" Target="Windows!Microsoft.Windows.Server.Computer" ConfirmDelivery="false" Remotable="true" Priority="Normal">
+        <Category>Discovery</Category>
+        <DiscoveryTypes>
+          <DiscoveryClass TypeID="McAfee.Seed">
+            <Property TypeID="System!System.Entity" PropertyID="DisplayName" />
+          </DiscoveryClass>
+        </DiscoveryTypes>
+        <DataSource ID="DSDiscovery.Seed" TypeID="Windows!Microsoft.Windows.FilteredRegistryDiscoveryProvider">
+          <ComputerName>$Target/Property[Type="Windows!Microsoft.Windows.Computer"]/NetworkName$</ComputerName>
+          <RegistryAttributeDefinitions>
+            <RegistryAttributeDefinition>
+              <AttributeName>Search</AttributeName>
+              <Path>SOFTWARE\McAfee\Agent\Applications</Path>
+              <PathType>0</PathType>
+              <AttributeType>0</AttributeType>
+            </RegistryAttributeDefinition>
+          </RegistryAttributeDefinitions>
+          <Frequency>86400</Frequency>
+          <ClassId>$MPElement[Name="McAfee.Seed"]$</ClassId>
+          <InstanceSettings>
+            <Settings>
+              <Setting>
+                <Name>$MPElement[Name="Windows!Microsoft.Windows.Computer"]/PrincipalName$</Name>
+                <Value>$Target/Property[Type="Windows!Microsoft.Windows.Computer"]/PrincipalName$</Value>
+              </Setting>
+              <Setting>
+                <Name>$MPElement[Name="System!System.Entity"]/DisplayName$</Name>
+                <Value>$Target/Property[Type="Windows!Microsoft.Windows.Computer"]/PrincipalName$</Value>
+              </Setting>
+            </Settings>
+          </InstanceSettings>
+          <Expression>
+            <SimpleExpression>
+              <ValueExpression>
+                <XPathQuery Type="String">Values/Search</XPathQuery>
+              </ValueExpression>
+              <Operator>Equal</Operator>
+              <ValueExpression>
+                <Value Type="String">True</Value>
+              </ValueExpression>
+            </SimpleExpression>
+          </Expression>
+        </DataSource>
+      </Discovery>
+    </Discoveries>
+    <Rules>
+      <Rule ID="McAfee.EventID7031.Alert.Rule" Enabled="true" Target="McAfee.Seed" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <ComputerName>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/NetworkName$</ComputerName>
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">570</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">EventDescription</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>Number of 7031 Events with McAfee service failures</Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>1</Severity>
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="McAfee.EventID7031.Alert.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue>$Data/EventDescription$</SuppressionValue>
+            </Suppression>
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+      <Rule ID="McAfee.SummaryReport.Script.Alert.Rule" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="McAfee.SummaryReport.Script.DataSource">
+            <TimeoutSeconds>600</TimeoutSeconds>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="WA" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>0</Severity>
+            <AlertMessageId>$MPElement[Name="McAfee.SummaryReport.Script.Alert.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/Property[@Name='Count']$</AlertParameter1>
+              <AlertParameter2>$Data/Property[@Name='Message']$</AlertParameter2>
+              <AlertParameter3>$Data/Property[@Name='Summary']$</AlertParameter3>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue>$Data/Property[@Name='Message']$</SuppressionValue>
+            </Suppression>
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+      <Rule ID="McAfee.SummaryReport.Script.Task.Alert.Rule" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+         <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">571</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">EventDescription</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>Number of 7031 Events with McAfee service failures </Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>
+            <Severity>0</Severity>
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="McAfee.SummaryReport.Script.Task.Alert.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+
+	  <Rule ID="McAfee.Agent.Service.ServiceNotFound.Recovery.Rule" Enabled="true" Target="McAfee.Seed" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <ComputerName>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/NetworkName$</ComputerName>
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">3751</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+				<Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">Params/Param[2]</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>macmnsvc</Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>  <!-- 0=Low 1=Medium 2=High -->
+            <Severity>0</Severity>  <!-- 0=Information 1=Warning 2=Critical -->
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="McAfee.Agent.Service.ServiceNotFound.Recovery.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue>$Data[Default='']/EventDisplayNumber$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/PublisherName$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/LoggingComputer$</SuppressionValue>
+            </Suppression>
+            <Custom1 />
+            <Custom2 />
+            <Custom3 />
+            <Custom4 />
+            <Custom5 />
+            <Custom6 />
+            <Custom7 />
+            <Custom8 />
+            <Custom9 />
+            <Custom10 />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+      <Rule ID="McAfee.Agent.Service.ServiceFoundRunning.Recovery.Rule" Enabled="true" Target="McAfee.Seed" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <ComputerName>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/NetworkName$</ComputerName>
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">3752</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+				<Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">Params/Param[2]</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>macmnsvc</Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>  <!-- 0=Low 1=Medium 2=High -->
+            <Severity>0</Severity>  <!-- 0=Information 1=Warning 2=Critical -->
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="McAfee.Agent.Service.ServiceFoundRunning.Recovery.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue>$Data[Default='']/EventDisplayNumber$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/PublisherName$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/LoggingComputer$</SuppressionValue>
+            </Suppression>
+            <Custom1 />
+            <Custom2 />
+            <Custom3 />
+            <Custom4 />
+            <Custom5 />
+            <Custom6 />
+            <Custom7 />
+            <Custom8 />
+            <Custom9 />
+            <Custom10 />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+	  <Rule ID="McAfee.Agent.Service.ServiceRecoveryFailed.Recovery.Rule" Enabled="true" Target="McAfee.Seed" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <ComputerName>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/NetworkName$</ComputerName>
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">3753</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+				<Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">Params/Param[2]</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>macmnsvc</Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>  <!-- 0=Low 1=Medium 2=High -->
+            <Severity>1</Severity>  <!-- 0=Information 1=Warning 2=Critical -->
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="McAfee.Agent.Service.ServiceRecoveryFailed.Recovery.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue>$Data[Default='']/EventDisplayNumber$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/PublisherName$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/LoggingComputer$</SuppressionValue>
+            </Suppression>
+            <Custom1 />
+            <Custom2 />
+            <Custom3 />
+            <Custom4 />
+            <Custom5 />
+            <Custom6 />
+            <Custom7 />
+            <Custom8 />
+            <Custom9 />
+            <Custom10 />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+	  <Rule ID="McAfee.Agent.Service.TooManyRecoveryAttempts.Recovery.Rule" Enabled="true" Target="McAfee.Seed" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <ComputerName>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/NetworkName$</ComputerName>
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">3754</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+				<Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">Params/Param[2]</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>macmnsvc</Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>  <!-- 0=Low 1=Medium 2=High -->
+            <Severity>0</Severity>  <!-- 0=Information 1=Warning 2=Critical -->
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="McAfee.Agent.Service.TooManyRecoveryAttempts.Recovery.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue>$Data[Default='']/EventDisplayNumber$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/PublisherName$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/LoggingComputer$</SuppressionValue>
+            </Suppression>
+            <Custom1 />
+            <Custom2 />
+            <Custom3 />
+            <Custom4 />
+            <Custom5 />
+            <Custom6 />
+            <Custom7 />
+            <Custom8 />
+            <Custom9 />
+            <Custom10 />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+	  <Rule ID="McAfee.Service.ServiceNotFound.Recovery.Rule" Enabled="true" Target="McAfee.Seed" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <ComputerName>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/NetworkName$</ComputerName>
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">3756</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+				<Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">Params/Param[2]</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>macmnsvc</Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>  <!-- 0=Low 1=Medium 2=High -->
+            <Severity>0</Severity>  <!-- 0=Information 1=Warning 2=Critical -->
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="McAfee.Service.ServiceNotFound.Recovery.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue>$Data[Default='']/EventDisplayNumber$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/PublisherName$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/LoggingComputer$</SuppressionValue>
+            </Suppression>
+            <Custom1 />
+            <Custom2 />
+            <Custom3 />
+            <Custom4 />
+            <Custom5 />
+            <Custom6 />
+            <Custom7 />
+            <Custom8 />
+            <Custom9 />
+            <Custom10 />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+      <Rule ID="McAfee.Service.ServiceFoundRunning.Recovery.Rule" Enabled="true" Target="McAfee.Seed" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <ComputerName>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/NetworkName$</ComputerName>
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">3757</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+				<Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">Params/Param[2]</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>macmnsvc</Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>  <!-- 0=Low 1=Medium 2=High -->
+            <Severity>0</Severity>  <!-- 0=Information 1=Warning 2=Critical -->
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="McAfee.Service.ServiceFoundRunning.Recovery.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue>$Data[Default='']/EventDisplayNumber$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/PublisherName$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/LoggingComputer$</SuppressionValue>
+            </Suppression>
+            <Custom1 />
+            <Custom2 />
+            <Custom3 />
+            <Custom4 />
+            <Custom5 />
+            <Custom6 />
+            <Custom7 />
+            <Custom8 />
+            <Custom9 />
+            <Custom10 />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+	  <Rule ID="McAfee.Service.ServiceRecoveryFailed.Recovery.Rule" Enabled="true" Target="McAfee.Seed" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <ComputerName>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/NetworkName$</ComputerName>
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">3758</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+				<Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">Params/Param[2]</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>macmnsvc</Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>  <!-- 0=Low 1=Medium 2=High -->
+            <Severity>1</Severity>  <!-- 0=Information 1=Warning 2=Critical -->
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="McAfee.Service.ServiceRecoveryFailed.Recovery.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue>$Data[Default='']/EventDisplayNumber$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/PublisherName$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/LoggingComputer$</SuppressionValue>
+            </Suppression>
+            <Custom1 />
+            <Custom2 />
+            <Custom3 />
+            <Custom4 />
+            <Custom5 />
+            <Custom6 />
+            <Custom7 />
+            <Custom8 />
+            <Custom9 />
+            <Custom10 />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+	  <Rule ID="McAfee.Service.TooManyRecoveryAttempts.Recovery.Rule" Enabled="true" Target="McAfee.Seed" ConfirmDelivery="true" Remotable="true" Priority="Normal" DiscardLevel="100">
+        <Category>Alert</Category>
+        <DataSources>
+          <DataSource ID="DS" TypeID="Windows!Microsoft.Windows.EventProvider">
+            <ComputerName>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/NetworkName$</ComputerName>
+            <LogName>Operations Manager</LogName>
+            <Expression>
+              <And>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="UnsignedInteger">EventDisplayNumber</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="UnsignedInteger">3759</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+                <Expression>
+                  <SimpleExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">PublisherName</XPathQuery>
+                    </ValueExpression>
+                    <Operator>Equal</Operator>
+                    <ValueExpression>
+                      <Value Type="String">Health Service Script</Value>
+                    </ValueExpression>
+                  </SimpleExpression>
+                </Expression>
+				<Expression>
+                  <RegExExpression>
+                    <ValueExpression>
+                      <XPathQuery Type="String">Params/Param[2]</XPathQuery>
+                    </ValueExpression>
+                    <Operator>ContainsSubstring</Operator>
+                    <Pattern>macmnsvc</Pattern>
+                  </RegExExpression>
+                </Expression>
+              </And>
+            </Expression>
+          </DataSource>
+        </DataSources>
+        <WriteActions>
+          <WriteAction ID="Alert" TypeID="Health!System.Health.GenerateAlert">
+            <Priority>1</Priority>  <!-- 0=Low 1=Medium 2=High -->
+            <Severity>0</Severity>  <!-- 0=Information 1=Warning 2=Critical -->
+            <AlertName />
+            <AlertDescription />
+            <AlertOwner />
+            <AlertMessageId>$MPElement[Name="McAfee.Service.TooManyRecoveryAttempts.Recovery.Rule.AlertMessage"]$</AlertMessageId>
+            <AlertParameters>
+              <AlertParameter1>$Data/EventDescription$</AlertParameter1>
+            </AlertParameters>
+            <Suppression>
+              <SuppressionValue>$Data[Default='']/EventDisplayNumber$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/PublisherName$</SuppressionValue>
+              <SuppressionValue>$Data[Default='']/LoggingComputer$</SuppressionValue>
+            </Suppression>
+            <Custom1 />
+            <Custom2 />
+            <Custom3 />
+            <Custom4 />
+            <Custom5 />
+            <Custom6 />
+            <Custom7 />
+            <Custom8 />
+            <Custom9 />
+            <Custom10 />
+          </WriteAction>
+        </WriteActions>
+      </Rule>
+	</Rules>
+    <Tasks>
+      <Task ID="McAfee.SummaryReport.Script.Task" Accessibility="Public" Enabled="true" Target="SC!Microsoft.SystemCenter.AllManagementServersPool" Timeout="120" Remotable="true">
+        <Category>Custom</Category>
+        <WriteAction ID="PSWA" TypeID="McAfee.SummaryReport.Script.WA">
+          <TimeoutSeconds>300</TimeoutSeconds>
+        </WriteAction>
+      </Task>
+    </Tasks>
+    <Monitors>
+      <UnitMonitor ID="McAfee.Agent.Service.Monitor" Accessibility="Public" Enabled="false" Target="McAfee.Seed" ParentMonitorID="Health!System.Health.AvailabilityState" Remotable="true" Priority="Normal" TypeID="McAfee.Service.Monitor.MonitorType" ConfirmDelivery="true">
+        <Category>AvailabilityHealth</Category>
+        <AlertSettings AlertMessage="McAfee.Agent.Service.Monitor.AlertMessage">
+          <AlertOnState>Warning</AlertOnState> <!-- Warning/Error - This must match a possible OperationalState\HealthState below -->
+          <AutoResolve>true</AutoResolve> <!-- true/false -->
+          <AlertPriority>Normal</AlertPriority> <!-- Low/Normal/High -->
+          <AlertSeverity>Warning</AlertSeverity> <!-- Error/Warning/Information/MatchMonitorHealth -->
+          <AlertParameters>
+            <AlertParameter1>$Data/Context/Property[@Name='Name']$</AlertParameter1>
+            <AlertParameter2>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/PrincipalName$</AlertParameter2>
+          </AlertParameters>
+        </AlertSettings>		
+        <OperationalStates>
+          <OperationalState ID="Running" MonitorTypeStateID="Running" HealthState="Success" /> <!-- HealthState can be Error/Warning/Success -->
+          <OperationalState ID="NotRunning" MonitorTypeStateID="NotRunning" HealthState="Warning" /> <!-- HealthState can be Error/Warning/Success -->
+        </OperationalStates>
+        <Configuration>
+          <ComputerName />
+          <ServiceName>masvc</ServiceName> <!-- This is the service name as seen in the registry at HKLM\SYSTEM\CCS\Services -->
+          <IntervalSeconds>300</IntervalSeconds> <!-- How often to check the state of the service.  Every 30 seconds is the default.-->
+          <CheckStartupType>false</CheckStartupType>
+          <Samples>3</Samples> <!-- The number of consecutive times a service is detected as not running before changing state of the monitor. 2 samples is the default -->
+        </Configuration>		
+      </UnitMonitor>
+      <UnitMonitor ID="McAfee.Service.Monitor" Accessibility="Public" Enabled="true" Target="McAfee.Seed" ParentMonitorID="Health!System.Health.AvailabilityState" Remotable="true" Priority="Normal" TypeID="McAfee.Service.Monitor.MonitorType" ConfirmDelivery="true">
+        <Category>AvailabilityHealth</Category>
+        <AlertSettings AlertMessage="McAfee.Service.Monitor.AlertMessage">
+          <AlertOnState>Warning</AlertOnState> <!-- Warning/Error - This must match a possible OperationalState\HealthState below -->
+          <AutoResolve>true</AutoResolve> <!-- true/false -->
+          <AlertPriority>Normal</AlertPriority> <!-- Low/Normal/High -->
+          <AlertSeverity>Warning</AlertSeverity> <!-- Error/Warning/Information/MatchMonitorHealth -->
+          <AlertParameters>
+            <AlertParameter1>$Data/Context/Property[@Name='Name']$</AlertParameter1>
+            <AlertParameter2>$Target/Host/Property[Type="Windows!Microsoft.Windows.Computer"]/PrincipalName$</AlertParameter2>
+          </AlertParameters>
+        </AlertSettings>		
+        <OperationalStates>
+          <OperationalState ID="Running" MonitorTypeStateID="Running" HealthState="Success" /> <!-- HealthState can be Error/Warning/Success -->
+          <OperationalState ID="NotRunning" MonitorTypeStateID="NotRunning" HealthState="Warning" /> <!-- HealthState can be Error/Warning/Success -->
+        </OperationalStates>
+        <Configuration>
+          <ComputerName />
+          <ServiceName>macmnsvc</ServiceName> <!-- This is the service name as seen in the registry at HKLM\SYSTEM\CCS\Services -->
+          <IntervalSeconds>300</IntervalSeconds> <!-- How often to check the state of the service.  Every 30 seconds is the default.-->
+          <CheckStartupType>false</CheckStartupType>
+          <Samples>3</Samples> <!-- The number of consecutive times a service is detected as not running before changing state of the monitor. 2 samples is the default -->
+        </Configuration>		
+      </UnitMonitor>
+      <UnitMonitor ID="McAfee.EventID7031.Monitor" Accessibility="Public" Enabled="true" Target="McAfee.Seed" ParentMonitorID="Health!System.Health.AvailabilityState" Remotable="true" Priority="Normal" TypeID="McAfee.EventID7031.Monitor.MonitorType" ConfirmDelivery="true">
+        <Category>AvailabilityHealth</Category>
+        <AlertSettings AlertMessage="McAfee.EventID7031.Monitor.AlertMessage">
+          <AlertOnState>Warning</AlertOnState>  <!-- Warning or Error should match OperationalStates below  -->
+          <AutoResolve>true</AutoResolve>
+          <AlertPriority>Normal</AlertPriority>
+          <AlertSeverity>MatchMonitorHealth</AlertSeverity>  <!-- Common options for AlertSeverity are MatchMonitorHealth, Information, Warning, Error -->
+        </AlertSettings>
+        <OperationalStates>
+          <OperationalState ID="GoodCondition" MonitorTypeStateID="GoodCondition" HealthState="Success" />
+          <OperationalState ID="BadCondition" MonitorTypeStateID="BadCondition" HealthState="Warning" />  <!-- HealthState = Warning or Error -->
+        </OperationalStates>
+        <Configuration>
+          <IntervalSeconds>900</IntervalSeconds>
+		  <SyncTime></SyncTime>
+          <TimeoutSeconds>300</TimeoutSeconds>
+        </Configuration>
+      </UnitMonitor>
+	</Monitors> 
+    <Recoveries>
+      <Recovery ID="McAfee.Agent.Service.Recovery" Accessibility="Public" Enabled="true" Target="McAfee.Seed" Monitor="McAfee.Agent.Service.Monitor" ResetMonitor="true" ExecuteOnState="Warning" Remotable="true" Timeout="300">
+        <Category>Custom</Category>
+		<WriteAction ID="PSWA" TypeID="Windows!Microsoft.Windows.PowerShellWriteAction">
+		  <ScriptName>McAfee.Agent.Service.Recovery.v10110.ps1</ScriptName>
+		  <ScriptBody>
+#=================================================================================
+#  Script to restart a service
+#
+#  Author:  Kevin Holman
+#
+#  Version:  1.0
+#
+#=================================================================================
+
+
+# Manual Testing section - put stuff here for manually testing script - typically parameters:
+#=================================================================================
+# $ServiceName = "masvc"
+#=================================================================================
+
+
+# Constants section - modify stuff here:
+#=================================================================================
+# Assign script name variable for use in event logging
+$ScriptName = "McAfee.Agent.Service.Recovery.v10110.ps1"
+$EventID = "3750"
+#=================================================================================
+
+
+# Starting Script section
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+#Set variable to be used in logging events
+$whoami = whoami
+# Load MOMScript API
+$momapi = New-Object -comObject MOM.ScriptAPI
+#=================================================================================
+
+
+# Begin MAIN script section
+#=================================================================================
+
+[string]$ServiceName = "masvc"
+
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Recovery script for service: ($ServiceName) is starting. `n Running as ($whoami).")
+write-host "Recovery script for service: ($ServiceName) is starting. Running as ($whoami)."
+
+#Get the service object
+$Svc = Get-Service $ServiceName
+
+#Check to ensure the service exists:
+IF (!$Svc)
+{
+  $momapi.LogScriptEvent($ScriptName,3751,2, "`n Service ($ServiceName) was not found on this computer. `n This indicates a misconfiguration of the monitor. `n Error is ($error)")
+  write-host "Service ($ServiceName) was not found on this computer. This indicates a misconfiguration of the monitor. Error is ($error)"
+  EXIT
+}
+
+#Get Service Status:
+[string]$SvcStatus = $Svc.Status
+
+#Do not continue is service is already running
+IF ($SvcStatus -eq "Running")
+{
+  $momapi.LogScriptEvent($ScriptName,3752,2, "`n Service ($ServiceName) was found to be in the Running state. `n This indicates a misconfiguration of the monitor. `n No recovery action will be taken.")
+  write-host "Service ($ServiceName) was found to be in the Running state. This indicates a misconfiguration of the monitor. No recovery action will be taken."
+  EXIT  
+}
+
+#Log recovery information event
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Service: ($ServiceName) was found to be in the ($SvcStatus) state.  Recovery will be attempted.")
+write-host "Service: ($ServiceName) was found to be in the ($SvcStatus) state.  Recovery will be attempted."
+
+#Attempt First Recovery
+#Restart-Service -Name $ServiceName -Force
+get-Service -Name $ServiceName | start-service
+#Wait time in seconds
+Start-Sleep 20
+#Get the service object
+$Svc = Get-Service $ServiceName
+#Get Service Status:
+$SvcStatus = $Svc.Status
+
+IF ($SvcStatus -ne "Running")
+{
+  #Attempt Second Recovery
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Service: ($ServiceName) second attempt at recovering starting now.")
+  write-host "Service: ($ServiceName) second attempt at recovering starting now."  
+  #Restart-Service -Name $ServiceName -Force
+	get-Service -Name $ServiceName | start-service
+  Start-Sleep 20
+  $Svc = Get-Service $ServiceName
+  $SvcStatus = $Svc.Status 
+}
+
+IF ($SvcStatus -ne "Running")
+{
+  #Attempt Third Recovery
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Service: ($ServiceName) third attempt at recovering starting now.")
+  write-host "Service: ($ServiceName) third attempt at recovering starting now."    
+  #Restart-Service -Name $ServiceName -Force
+	get-Service -Name $ServiceName | start-service
+  Start-Sleep 20
+  $Svc = Get-Service $ServiceName
+  $SvcStatus = $Svc.Status 
+}
+
+IF ($SvcStatus -eq "Running")
+{
+  #Log event of a successful restart
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Service: ($ServiceName) was successfully restarted and then detected to be in the Running state.")
+  write-host "Service: ($ServiceName) was successfully restarted and then detected to be in the Running state."
+}
+ELSE
+{
+  #Log event of a successful restart
+  $momapi.LogScriptEvent($ScriptName,3753,2,"`n Service: ($ServiceName) is not running. `n Recovery was attempted and failed. `n Manual intervention is required. `n The last detected service status was ($SvcStatus).") 
+  write-host "Service: ($ServiceName) is not running. Recovery was attempted and failed. Manual intervention is required. The last detected service status was ($SvcStatus)."
+}
+
+# Check to see if this recovery script has been run multiple times in the last x minutes for detection of too many recovery actions
+$Message = "*($ServiceName) is starting*"
+$Events = Get-EventLog -LogName 'Operations Manager' -After $StartTime.AddMinutes(-60) -Message $Message | where {$_.EventID -eq 3750}
+$EventCount = $Events.Count
+IF ($EventCount -ge 3)
+{
+  $momapi.LogScriptEvent($ScriptName,3754,2,"`n Too many service recoveries have been attempted for ($ServiceName). `n ($EventCount) recoveries are detected in the event log. `n Manual intervention is required.")
+  write-host "Too many service recoveries have been attempted for ($ServiceName). ($EventCount) recoveries are detected in the event log. Manual intervention is required."
+}
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+write-host "Script Completed. Script Runtime: ($ScriptTime) seconds."
+#=================================================================================
+# End of script		  
+		  </ScriptBody>
+		  <TimeoutSeconds>240</TimeoutSeconds>
+		</WriteAction>
+      </Recovery>
+      <Recovery ID="McAfee.Service.Recovery" Accessibility="Public" Enabled="true" Target="McAfee.Seed" Monitor="McAfee.Service.Monitor" ResetMonitor="true" ExecuteOnState="Warning" Remotable="true" Timeout="300">
+        <Category>Custom</Category>
+		<WriteAction ID="PSWA" TypeID="Windows!Microsoft.Windows.PowerShellWriteAction">
+		  <ScriptName>McAfee.Service.Recovery.v10110.ps1</ScriptName>
+		  <ScriptBody>
+#=================================================================================
+#  Script to restart a service
+#
+#  Author:  Kevin Holman
+#
+#  Version:  1.0
+#
+#=================================================================================
+
+
+# Manual Testing section - put stuff here for manually testing script - typically parameters:
+#=================================================================================
+# $ServiceName = "macmnsvc"
+#=================================================================================
+
+
+# Constants section - modify stuff here:
+#=================================================================================
+# Assign script name variable for use in event logging
+$ScriptName = "McAfee.Service.Recovery.v10110.ps1"
+$EventID = "3755"
+#=================================================================================
+
+
+# Starting Script section
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+#Set variable to be used in logging events
+$whoami = whoami
+# Load MOMScript API
+$momapi = New-Object -comObject MOM.ScriptAPI
+#=================================================================================
+
+
+# Begin MAIN script section
+#=================================================================================
+
+[string]$ServiceName = "macmnsvc"
+
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Recovery script for service: ($ServiceName) is starting. `n Running as ($whoami).")
+write-host "Recovery script for service: ($ServiceName) is starting. Running as ($whoami)."
+
+#Get the service object
+$Svc = Get-Service $ServiceName
+
+#Check to ensure the service exists:
+IF (!$Svc)
+{
+  $momapi.LogScriptEvent($ScriptName,3756,2, "`n Service ($ServiceName) was not found on this computer. `n This indicates a misconfiguration of the monitor. `n Error is ($error)")
+  write-host "Service ($ServiceName) was not found on this computer. This indicates a misconfiguration of the monitor. Error is ($error)"
+  EXIT
+}
+
+#Get Service Status:
+[string]$SvcStatus = $Svc.Status
+
+#Do not continue is service is already running
+IF ($SvcStatus -eq "Running")
+{
+  $momapi.LogScriptEvent($ScriptName,3757,2, "`n Service ($ServiceName) was found to be in the Running state. `n This indicates a misconfiguration of the monitor. `n No recovery action will be taken.")
+  write-host "Service ($ServiceName) was found to be in the Running state. This indicates a misconfiguration of the monitor. No recovery action will be taken."
+  EXIT  
+}
+
+#Log recovery information event
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Service: ($ServiceName) was found to be in the ($SvcStatus) state.  Recovery will be attempted.")
+write-host "Service: ($ServiceName) was found to be in the ($SvcStatus) state.  Recovery will be attempted."
+
+#Attempt First Recovery
+#Restart-Service -Name $ServiceName -Force
+get-Service -Name $ServiceName | start-service
+#Wait time in seconds
+Start-Sleep 20
+#Get the service object
+$Svc = Get-Service $ServiceName
+#Get Service Status:
+$SvcStatus = $Svc.Status
+
+IF ($SvcStatus -ne "Running")
+{
+  #Attempt Second Recovery
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Service: ($ServiceName) second attempt at recovering starting now.")
+  write-host "Service: ($ServiceName) second attempt at recovering starting now."  
+	#Restart-Service -Name $ServiceName -Force
+	get-Service -Name $ServiceName | start-service
+  Start-Sleep 20
+  $Svc = Get-Service $ServiceName
+  $SvcStatus = $Svc.Status 
+}
+
+IF ($SvcStatus -ne "Running")
+{
+  #Attempt Third Recovery
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Service: ($ServiceName) third attempt at recovering starting now.")
+  write-host "Service: ($ServiceName) third attempt at recovering starting now."    
+	#Restart-Service -Name $ServiceName -Force
+	get-Service -Name $ServiceName | start-service
+  Start-Sleep 20
+  $Svc = Get-Service $ServiceName
+  $SvcStatus = $Svc.Status 
+}
+
+IF ($SvcStatus -eq "Running")
+{
+  #Log event of a successful restart
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Service: ($ServiceName) was successfully restarted and then detected to be in the Running state.")
+  write-host "Service: ($ServiceName) was successfully restarted and then detected to be in the Running state."
+}
+ELSE
+{
+  #Log event of a successful restart
+  $momapi.LogScriptEvent($ScriptName,3758,2,"`n Service: ($ServiceName) is not running. `n Recovery was attempted and failed. `n Manual intervention is required. `n The last detected service status was ($SvcStatus).") 
+  write-host "Service: ($ServiceName) is not running. Recovery was attempted and failed. Manual intervention is required. The last detected service status was ($SvcStatus)."
+}
+
+# Check to see if this recovery script has been run multiple times in the last x minutes for detection of too many recovery actions
+$Message = "*($ServiceName) is starting*"
+$Events = Get-EventLog -LogName 'Operations Manager' -After $StartTime.AddMinutes(-60) -Message $Message | where {$_.EventID -eq 3750}
+$EventCount = $Events.Count
+IF ($EventCount -ge 3)
+{
+  $momapi.LogScriptEvent($ScriptName,3759,2,"`n Too many service recoveries have been attempted for ($ServiceName). `n ($EventCount) recoveries are detected in the event log. `n Manual intervention is required.")
+  write-host "Too many service recoveries have been attempted for ($ServiceName). ($EventCount) recoveries are detected in the event log. Manual intervention is required."
+}
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+write-host "Script Completed. Script Runtime: ($ScriptTime) seconds."
+#=================================================================================
+# End of script		  
+		  </ScriptBody>
+		  <TimeoutSeconds>240</TimeoutSeconds>
+		</WriteAction>
+      </Recovery>
+      <Recovery ID="McAfee.Service.AND.TCPPort.Recovery" Accessibility="Public" Enabled="true" Target="McAfee.Seed" Monitor="McAfee.Service.Monitor" ResetMonitor="true" ExecuteOnState="Warning" Remotable="true" Timeout="300">
+        <Category>Custom</Category>
+		<WriteAction ID="PSWA" TypeID="Windows!Microsoft.Windows.PowerShellWriteAction">
+		  <ScriptName>McAfee.Service.AND.TCPPort.Recovery.v10110.ps1</ScriptName>
+		  <ScriptBody>
+#=================================================================================
+#  Script to restart a service
+#
+#  Author:  Kevin Holman
+#
+#  Version:  1.0
+#
+#=================================================================================
+
+
+# Manual Testing section - put stuff here for manually testing script - typically parameters:
+#=================================================================================
+# $ServiceName = "macmnsvc"
+#=================================================================================
+
+
+# Constants section - modify stuff here:
+#=================================================================================
+# Assign script name variable for use in event logging
+$ScriptName = "McAfee.Service.AND.TCPPort.Recovery.v10110.ps1"
+$EventID = "3760"
+#=================================================================================
+
+
+# Starting Script section
+#=================================================================================
+# Gather the start time of the script
+$StartTime = Get-Date
+#Set variable to be used in logging events
+$whoami = whoami
+# Load MOMScript API
+$momapi = New-Object -comObject MOM.ScriptAPI
+#=================================================================================
+
+
+# Begin MAIN script section
+#=================================================================================
+
+[string]$ServiceName = "macmnsvc"
+
+#Log script event that we are starting task
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Recovery script for service: ($ServiceName) is starting. `n Running as ($whoami).")
+write-host "Recovery script for service: ($ServiceName) is starting. Running as ($whoami)."
+
+#Get the service object
+$Svc = Get-Service $ServiceName
+
+#Check to ensure the service exists:
+IF (!$Svc)
+{
+  $momapi.LogScriptEvent($ScriptName,3761,2, "`n Service ($ServiceName) was not found on this computer. `n This indicates a misconfiguration of the monitor. `n Error is ($error)")
+  write-host "Service ($ServiceName) was not found on this computer. This indicates a misconfiguration of the monitor. Error is ($error)"
+  EXIT
+}
+
+#Get Service Status:
+[string]$SvcStatus = $Svc.Status
+
+#Do not continue is service is already running
+IF ($SvcStatus -eq "Running")
+{
+  $momapi.LogScriptEvent($ScriptName,3762,2, "`n Service ($ServiceName) was found to be in the Running state. `n This indicates a misconfiguration of the monitor. `n No recovery action will be taken.")
+  write-host "Service ($ServiceName) was found to be in the Running state. This indicates a misconfiguration of the monitor. No recovery action will be taken."
+  EXIT  
+}
+
+#Log recovery information event
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Service: ($ServiceName) was found to be in the ($SvcStatus) state.  Recovery will be attempted.")
+write-host "Service: ($ServiceName) was found to be in the ($SvcStatus) state.  Recovery will be attempted."
+
+#Attempt First Recovery
+#Restart-Service -Name $ServiceName -Force
+get-Service -Name $ServiceName | start-service
+#Wait time in seconds
+Start-Sleep 20
+#Get the service object
+$Svc = Get-Service $ServiceName
+#Get Service Status:
+$SvcStatus = $Svc.Status
+
+IF ($SvcStatus -ne "Running")
+{
+  #Attempt Second Recovery
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Service: ($ServiceName) second attempt at recovering starting now.")
+  write-host "Service: ($ServiceName) second attempt at recovering starting now."  
+	#Restart-Service -Name $ServiceName -Force
+	get-Service -Name $ServiceName | start-service
+  Start-Sleep 20
+  $Svc = Get-Service $ServiceName
+  $SvcStatus = $Svc.Status 
+}
+
+IF ($SvcStatus -ne "Running")
+{
+  #Attempt Third Recovery
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Service: ($ServiceName) third attempt at recovering starting now.")
+  write-host "Service: ($ServiceName) third attempt at recovering starting now."    
+	#Restart-Service -Name $ServiceName -Force
+	get-Service -Name $ServiceName | start-service
+  Start-Sleep 20
+  $Svc = Get-Service $ServiceName
+  $SvcStatus = $Svc.Status 
+}
+
+IF ($SvcStatus -eq "Running")
+{
+  #Log event of a successful restart
+  $momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Service: ($ServiceName) was successfully restarted and then detected to be in the Running state.")
+  write-host "Service: ($ServiceName) was successfully restarted and then detected to be in the Running state."
+}
+ELSE
+{
+  #Log event of a successful restart
+  $momapi.LogScriptEvent($ScriptName,3763,2,"`n Service: ($ServiceName) is not running. `n Recovery was attempted and failed. `n Manual intervention is required. `n The last detected service status was ($SvcStatus).") 
+  write-host "Service: ($ServiceName) is not running. Recovery was attempted and failed. Manual intervention is required. The last detected service status was ($SvcStatus)."
+}
+
+# Check to see if this recovery script has been run multiple times in the last x minutes for detection of too many recovery actions
+$Message = "*($ServiceName) is starting*"
+$Events = Get-EventLog -LogName 'Operations Manager' -After $StartTime.AddMinutes(-60) -Message $Message | where {$_.EventID -eq 3750}
+$EventCount = $Events.Count
+IF ($EventCount -ge 3)
+{
+  $momapi.LogScriptEvent($ScriptName,3764,2,"`n Too many service recoveries have been attempted for ($ServiceName). `n ($EventCount) recoveries are detected in the event log. `n Manual intervention is required.")
+  write-host "Too many service recoveries have been attempted for ($ServiceName). ($EventCount) recoveries are detected in the event log. Manual intervention is required."
+}
+
+# End of script section
+#=================================================================================
+#Log an event for script ending and total execution time.
+$EndTime = Get-Date
+$ScriptTime = ($EndTime - $StartTime).TotalSeconds
+$momapi.LogScriptEvent($ScriptName,$EventID,0,"`n Script Completed. `n Script Runtime: ($ScriptTime) seconds.")
+write-host "Script Completed. Script Runtime: ($ScriptTime) seconds."
+#=================================================================================
+# End of script		  
+		  </ScriptBody>
+		  <TimeoutSeconds>240</TimeoutSeconds>
+		</WriteAction>
+      </Recovery>
+    </Recoveries>
+  </Monitoring>
+  <Presentation>
+    <StringResources>
+	  <StringResource ID="McAfee.SummaryReport.Script.Alert.Rule.AlertMessage" />
+      <StringResource ID="McAfee.SummaryReport.Script.Task.Alert.Rule.AlertMessage" />
+      <StringResource ID="McAfee.Agent.Service.Monitor.AlertMessage" />	
+	  <StringResource ID="McAfee.Agent.Service.ServiceNotFound.Recovery.Rule.AlertMessage" />
+      <StringResource ID="McAfee.Agent.Service.ServiceFoundRunning.Recovery.Rule.AlertMessage" />
+	  <StringResource ID="McAfee.Agent.Service.ServiceRecoveryFailed.Recovery.Rule.AlertMessage" />
+	  <StringResource ID="McAfee.Agent.Service.TooManyRecoveryAttempts.Recovery.Rule.AlertMessage" />
+      <StringResource ID="McAfee.Service.Monitor.AlertMessage" />	
+	  <StringResource ID="McAfee.Service.ServiceNotFound.Recovery.Rule.AlertMessage" />
+      <StringResource ID="McAfee.Service.ServiceFoundRunning.Recovery.Rule.AlertMessage" />
+	  <StringResource ID="McAfee.Service.ServiceRecoveryFailed.Recovery.Rule.AlertMessage" />
+	  <StringResource ID="McAfee.Service.TooManyRecoveryAttempts.Recovery.Rule.AlertMessage" />
+      <StringResource ID="McAfee.EventID7031.Monitor.AlertMessage" />
+	  <StringResource ID="McAfee.EventID7031.Alert.Rule.AlertMessage" />
+	</StringResources>
+  </Presentation>
+  <LanguagePacks>
+    <LanguagePack ID="ENU" IsDefault="false">
+      <DisplayStrings>
+        <DisplayString ElementID="McAfee.Monitoring.Customizations">
+          <Name>McAfee Monitoring Customizations</Name>
+          <Description>
+v1.0.1.1  18 Jul 2023 - Updated reports to informational
+v1.0.1.0   6 Jun 2021 - Updated summary report
+v1.0.0.11  9 Aug 2021 - Updated 7031 event, property bag, and extended to run in past 15 minutes
+v1.0.0.9  26 May 2021 - Updated Datasources, included new recovery task for service and tcp port logic
+v1.0.0.4  14 Apr 2021 - Updated recovery service command, monitors to Warning
+v1.0.0.0   5 Apr 2021 - Created for McAfee service running issues</Description>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Seed">
+          <Name>McAfee Service Seed Discovery</Name>
+          <Description>McAfee Service Seed Discovery</Description>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Monitoring.Group">
+          <Name>McAfee Service Server Group</Name>
+          <Description>McAfee Service Group targeted Discovery</Description>
+        </DisplayString>
+
+		<DisplayString ElementID="McAfee.SummaryReport.Script.DataSource">	
+          <Name>DailyTasks McAfee Service Alerts Summary Report and auto-close DataSource</Name>
+          <Description>This datasource generates DNSAlerts summary report and auto-close DataSource</Description>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.SummaryReport.Script.WA">	
+          <Name>DailyTasks McAfee Service Alerts summary report and auto-close on-demand task</Name>
+          <Description>This write-action task generates DNSAlerts summary report and auto-close write action</Description>
+        </DisplayString>
+
+        <DisplayString ElementID="McAfee.Service.Monitor.MonitorType">	
+          <Name>McAfee Service Monitor MonitorType</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.EventID7031.Monitor.MonitorType">	
+          <Name>McAfee Event ID 7031 Monitor for Service failures</Name>
+        </DisplayString>
+
+        <DisplayString ElementID="McAfee.Monitoring.Group.Discovery">	
+          <Name>McAfee Discovery Seed Discovery</Name>
+          <Description>This discovery builds group (class) of servers in the environment</Description>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Discovery.Seed">	
+          <Name>McAfee Discovery Seed Discovery</Name>
+          <Description>This discovery checks registry for McAfee software install</Description>
+        </DisplayString>
+
+        <DisplayString ElementID="McAfee.EventID7031.Alert.Rule">
+          <Name>McAfee EventID7031 Rule</Name>
+          <Description></Description>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.EventID7031.Alert.Rule.AlertMessage">
+          <Name>McAfee EventID7031 Rule Alert</Name>
+          <Description>McAfee EventID7031 Monitor: detected a bad condition</Description>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.SummaryReport.Script.Alert.Rule">
+          <Name>DailyTasks McAfee Service Alerts Summary Report Script Alert Rule</Name>
+          <Description>Proactive Scheduled rule to kick off summary datasource at 0615 M-F</Description>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.SummaryReport.Script.Alert.Rule.AlertMessage">
+          <Name>DailyTasks McAfee Service Alerts Summary Report Script Alert Rule</Name>
+          <Description>{1}
+
+{2}</Description>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.SummaryReport.Script.Task.Alert.Rule">
+          <Name>DailyTasks McAfee Service Alerts Summary Report Manual Task Rule</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.SummaryReport.Script.Task.Alert.Rule.AlertMessage">
+          <Name>DailyTasks McAfee Service Alerts Summary Report Script Task Rule Alert</Name>
+          <Description>{0}</Description>
+        </DisplayString>
+		<DisplayString ElementID="McAfee.Agent.Service.ServiceNotFound.Recovery.Rule">
+          <Name>McAfee Agent Service Service Recovery Failed - Service Not Found Rule</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Agent.Service.ServiceNotFound.Recovery.Rule.AlertMessage">
+          <Name>McAfee Agent Service Recovery Failed - Service Not Found</Name>
+          <Description>Event Description: {0}</Description>
+        </DisplayString>		  
+		<DisplayString ElementID="McAfee.Agent.Service.ServiceFoundRunning.Recovery.Rule">
+          <Name>McAfee Agent Service Service Recovery Failed - Service Already Running Rule</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Agent.Service.ServiceFoundRunning.Recovery.Rule.AlertMessage">
+          <Name>McAfee Agent Service Recovery Failed - Service Already Running</Name>
+          <Description>Event Description: {0}</Description>
+        </DisplayString>
+		<DisplayString ElementID="McAfee.Agent.Service.ServiceRecoveryFailed.Recovery.Rule">
+          <Name>McAfee Agent Service Service Recovery Failed - Service is not running Rule</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Agent.Service.ServiceRecoveryFailed.Recovery.Rule.AlertMessage">
+          <Name>McAfee Agent Service Recovery Failed - Service is not running</Name>
+          <Description>Event Description: {0}</Description>
+        </DisplayString>
+		<DisplayString ElementID="McAfee.Agent.Service.TooManyRecoveryAttempts.Recovery.Rule">
+          <Name>McAfee Agent Service Service Recovery has attempted to recover the service too many times Rule</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Agent.Service.TooManyRecoveryAttempts.Recovery.Rule.AlertMessage">
+          <Name>McAfee Agent Service Recovery has attempted to recover the service too many times</Name>
+          <Description>Event Description: {0}</Description>
+        </DisplayString>
+		<DisplayString ElementID="McAfee.Service.ServiceNotFound.Recovery.Rule">
+          <Name>McAfee Service Service Recovery Failed - Service Not Found Rule</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Service.ServiceNotFound.Recovery.Rule.AlertMessage">
+          <Name>McAfee Service Recovery Failed - Service Not Found</Name>
+          <Description>Event Description: {0}</Description>
+        </DisplayString>		  
+		<DisplayString ElementID="McAfee.Service.ServiceFoundRunning.Recovery.Rule">
+          <Name>McAfee Service Service Recovery Failed - Service Already Running Rule</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Service.ServiceFoundRunning.Recovery.Rule.AlertMessage">
+          <Name>McAfee Service Recovery Failed - Service Already Running</Name>
+          <Description>Event Description: {0}</Description>
+        </DisplayString>
+		<DisplayString ElementID="McAfee.Service.ServiceRecoveryFailed.Recovery.Rule">
+          <Name>McAfee Service Service Recovery Failed - Service is not running Rule</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Service.ServiceRecoveryFailed.Recovery.Rule.AlertMessage">
+          <Name>McAfee Service Recovery Failed - Service is not running</Name>
+          <Description>Event Description: {0}</Description>
+        </DisplayString>
+		<DisplayString ElementID="McAfee.Service.TooManyRecoveryAttempts.Recovery.Rule">
+          <Name>McAfee Service Service Recovery has attempted to recover the service too many times Rule</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Service.TooManyRecoveryAttempts.Recovery.Rule.AlertMessage">
+          <Name>McAfee Service Recovery has attempted to recover the service too many times</Name>
+          <Description>Event Description: {0}</Description>
+        </DisplayString>
+
+        <DisplayString ElementID="McAfee.SummaryReport.Script.Task">
+          <Name>DailyTasks McAfee Service Alerts Summary Report Script Task</Name>
+          <Description>NG McAfee SummaryReport task to kick off on-demand</Description>
+        </DisplayString>
+
+        <DisplayString ElementID="McAfee.Agent.Service.Monitor">
+          <Name>McAfee Agent Service Monitor</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Agent.Service.Monitor" SubElementID="Running">
+          <Name>Running</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Agent.Service.Monitor" SubElementID="NotRunning">
+          <Name>Not Running</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Agent.Service.Monitor.AlertMessage">
+          <Name>McAfee Agent Service Is Not Running</Name>
+          <Description>The Service: {0} is not running on Computer: {1}</Description>
+        </DisplayString>		
+        <DisplayString ElementID="McAfee.Service.Monitor">
+          <Name>McAfee Service Monitor</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Service.Monitor" SubElementID="Running">
+          <Name>Running</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Service.Monitor" SubElementID="NotRunning">
+          <Name>Not Running</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Service.Monitor.AlertMessage">
+          <Name>McAfee Service Is Not Running</Name>
+          <Description>The Service: {0} is not running on Computer: {1}</Description>
+        </DisplayString>		
+        <DisplayString ElementID="McAfee.EventID7031.Monitor">
+          <Name>McAfee EventID7031 Monitor</Name>
+          <Description></Description>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.EventID7031.Monitor" SubElementID="GoodCondition">
+          <Name>Good Condition</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.EventID7031.Monitor" SubElementID="BadCondition">
+          <Name>Bad Condition</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.EventID7031.Monitor.AlertMessage">
+          <Name>McAfee EventID7031 Monitor alert</Name>
+          <Description>
+Count: {1}
+Summary: {2}</Description>
+        </DisplayString>
+
+        <DisplayString ElementID="McAfee.Agent.Service.Recovery">
+          <Name>McAfee Agent Service Service Recovery</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Service.Recovery">
+          <Name>McAfee Service Service Recovery</Name>
+        </DisplayString>
+        <DisplayString ElementID="McAfee.Service.AND.TCPPort.Recovery">
+          <Name>McAfee Service AND TCPPort Recovery</Name>
+        </DisplayString>
+      </DisplayStrings>
+    </LanguagePack>
+  </LanguagePacks>
+</ManagementPack>
