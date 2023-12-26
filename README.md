@@ -2,6 +2,7 @@
 McAfee Monitoring Customizations 1.0.1.2
 
 Download [here](https://github.com/theKevinJustin/TrellixAgentMonitoring/blob/main/McAfee.Monitoring.Customizations.xml)
+
 See blog [https://kevinjustin.com/blog/2023/08/30/trellix-agent-pack/](https://kevinjustin.com/blog/2023/08/30/trellix-agent-pack/)
 
 
