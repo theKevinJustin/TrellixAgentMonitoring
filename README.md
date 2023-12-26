@@ -1,9 +1,10 @@
 # TrellixAgentMonitoring
 McAfee Monitoring Customizations 1.0.1.2
 
-Download here
+Download [here](https://github.com/theKevinJustin/TrellixAgentMonitoring/blob/main/McAfee.Monitoring.Customizations.xml)
+[Blog](https://kevinjustin.com/blog/2023/08/30/trellix-agent-pack/)
 
-## Trellix/McAfee Monitoring Customizations
+### Trellix/McAfee Monitoring Customizations
 Monitor Trellix agent for failures, 7031 event count monitor, discovers application via registry key, Seed class, daily report summary and on-demand task.
 
 # Version history:
